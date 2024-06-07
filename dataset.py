@@ -1,34 +1,69 @@
 import torchvision
 import torch
 from torch.utils.data import DataLoader
-from torchvision.transforms import Compose, Lambda, ToTensor, Pad
+import torchvision.transforms as transforms
+from torchvision.transforms import Compose, Lambda, ToTensor, Pad, Resize
+from torch.utils.data.distributed import DistributedSampler
 import einops
 import numpy as np
 import cv2
 
+import os
+import pandas as pd
+from tqdm import tqdm
+# def get_dataloader(batch_size: int):
+#     transform = Compose([ToTensor(), 
+#                          Pad(padding=2, fill=0),
+#                          Lambda(lambda x: (x - 0.5) * 2)
+#                          ])
+#     dataset = torchvision.datasets.MNIST(root='./data/mnist',
+#                                          transform=transform, download=True)
+#     return DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-
-def get_dataloader(batch_size: int):
-    transform = Compose([ToTensor(), 
-                         Pad(padding=2, fill=0),
-                         Lambda(lambda x: (x - 0.5) * 2)
-                         ])
-    dataset = torchvision.datasets.MNIST(root='./data/mnist',
-                                         transform=transform, download=True)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=True)
-
-def get_img_shape():
-    return (1, 32, 32)
+# def get_img_shape():
+#     return (1, 32, 32)
 
 # def get_dataloader(batch_size: int):
 #     transform = Compose([ToTensor(), Lambda(lambda x: (x - 0.5) * 2)])
-#     data_dir = './data/faces'
+#     data_dir = '../faces'
 #     dataset = torchvision.datasets.ImageFolder(root=data_dir,
 #                                          transform=transform)
 #     return DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
 # def get_img_shape():
 #     return (3, 96, 96)
+
+
+def get_dataloader(batch_size: int, data_dir, num_workers = 0, distributed = False):
+    
+    transform = Compose([ToTensor(), 
+                        #  Resize(256),
+                        #  transforms.CenterCrop(256),
+                         Resize(64),
+                         Lambda(lambda x: (x - 0.5) * 2)
+                         ])
+    dataset = torchvision.datasets.ImageFolder(root=data_dir,
+                                         transform=transform)
+    if distributed:
+        sampler = DistributedSampler(dataset)
+    
+    if distributed:
+        return DataLoader(
+            dataset, 
+            batch_size=batch_size,
+            num_workers = num_workers,
+            shuffle=(sampler is None),
+            sampler = sampler, 
+            pin_memory=True,
+            drop_last=True,
+             )
+    else:
+        return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers = num_workers)
+
+def get_img_shape():
+    # return (3, 256, 256)    # 虽然这么写很蠢。但是好像还真挺好用
+    return (3, 64, 64)    # 虽然这么写很蠢。但是好像还真挺好用
+
 
 def module_test():
     batch_size = 64
@@ -49,6 +84,28 @@ def module_test():
     cv2.imwrite('minst88.jpg', x_new)
     
 
+def Img_process():          # 我现在的图片大小都不一样，我要重新裁剪一下看看效果，正常train时不需要重新裁剪，transformer就能直接处理
+    transform = Compose([ToTensor(), 
+                         Resize(256),
+                         transforms.CenterCrop(256)
+                         ])
+    data_dir = '../face2face/dataset/train/B'
+    dataset = torchvision.datasets.ImageFolder(root=data_dir,
+                                         transform=transform)
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
+        
+    save_dir = '../face2face/dataset/train/C/C'  # 指定保存图像的目录
+    os.makedirs(save_dir, exist_ok=True)  # 创建保存目录
+
+    for i, (x, _) in tqdm(enumerate(dataloader)):
+        image = transforms.ToPILImage()(x.squeeze())  # 将张量转换为PIL图像
+        save_path = os.path.join(save_dir, f"image_{i}.jpg")  # 构建保存路径
+        
+        os.makedirs(save_dir, exist_ok=True)  # 创建保存目录
+        
+        image.save(save_path)  # 保存图像到指定路径
+        
 
 if __name__ == '__main__':
-    module_test()
+    # module_test()
+    Img_process()

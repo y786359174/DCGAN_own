@@ -5,23 +5,40 @@ import torch.nn as nn
 from dataset import get_dataloader, get_img_shape
 from network import Generator,  Discriminator , wgan_flag, weights_init_normal
 
-
+import torch.distributed as dist ## DDP
+from torch.utils.data.distributed import DistributedSampler ## DDP
+from torch.nn.parallel import DistributedDataParallel as DDP ## DDP
+from torch.distributed import init_process_group, destroy_process_group ## DDP
 
 import cv2
 import einops
 import numpy as np
+# import tqdm as tqdm
+Distributed_Flag = True # torchrun -m --nnodes=1 --nproc_per_node=2 mainmp
 
-def train(gen:Generator, dis:Discriminator, ckpt_path, device = 'cuda'):
+def train(gen:Generator, dis:Discriminator, ckpt_path, local_rank = 0, device = 'cuda'):
     
     n_epochs = 10000
     batch_size = 256
     lr = 1e-5
     beta1 = 0.5
     k_max = 1
+    gennz = gen.nz
     criterion = nn.BCELoss().to(device)         # 二元交叉熵损失，因为此时只有0和1的概率，且和为100%，所以可以不算向量，只算一个值（反正另一个也能间接求出来。
                                                 # Loss = -w * [p * log(q) + (1-p) * log(1-q)]
                                                 # 这东西也能放在cuda中啊
-    dataloader = get_dataloader(batch_size, num_worker=4)
+    data_dir = '../faces'
+    if Distributed_Flag:
+        dataloader = get_dataloader(batch_size, data_dir, num_workers=4, distributed=True)
+        gen = torch.nn.SyncBatchNorm.convert_sync_batchnorm(gen).to(device)
+        gen = DDP(gen, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+        dis = torch.nn.SyncBatchNorm.convert_sync_batchnorm(dis).to(device)
+        dis = DDP(dis, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+    else:
+        dataloader = get_dataloader(batch_size, data_dir, num_workers=4)
+
+    
+    
     if not wgan_flag:
         optim_gen = torch.optim.Adam(gen.parameters(), lr, betas=(beta1, 0.999))    # betas 是一个优化参数，简单来说就是考虑近期的梯度信息的程度
         optim_dis = torch.optim.Adam(dis.parameters(), lr, betas=(beta1, 0.999))
@@ -37,6 +54,9 @@ def train(gen:Generator, dis:Discriminator, ckpt_path, device = 'cuda'):
                                                                     # 我把他从循环中挪出来并且检测x的bn不是batch_size就跳过
     k = k_max
     for epoch_i in range(n_epochs):
+        if Distributed_Flag and local_rank >= 0:
+            torch.distributed.barrier()
+            dataloader.sampler.set_epoch(epoch_i)
         tic = time.time()
         score_r_avg = 0
         score_f_avg = 0
@@ -46,10 +66,9 @@ def train(gen:Generator, dis:Discriminator, ckpt_path, device = 'cuda'):
             if(x.shape[0]!=batch_size):
                 continue
             img_real = x.to(device)
-            
 
             # 训练Dis
-            z = torch.randn(batch_size, gen.nz, 1, 1, device=device)   # gen用的噪声向量
+            z = torch.randn(batch_size, gennz, 1, 1, device=device)   # gen用的噪声向量
             img_fake = gen(z)
             dis.zero_grad()
             score_r = dis(img_real)
@@ -67,10 +86,9 @@ def train(gen:Generator, dis:Discriminator, ckpt_path, device = 'cuda'):
             else:
                 for p in dis.parameters():
                     p.data.clamp_(-0.01, 0.01)
-
             if(epoch_i%k==0):                           # 因为最开始dis梯度大，快收敛时gen梯度大，所以在这调节一下平衡
                 # 训练Gen
-                z = torch.randn(batch_size, gen.nz, 1, 1, device=device)   # gen用的噪声向量
+                z = torch.randn(batch_size, gennz, 1, 1, device=device)   # gen用的噪声向量
                 img_fake = gen(z)
                 gen.zero_grad()                                            # 这个和optim_gen.zero_grad()有什么区别？现在没啥区别因为一个model就对应一个optim
                 if not wgan_flag:
@@ -81,15 +99,24 @@ def train(gen:Generator, dis:Discriminator, ckpt_path, device = 'cuda'):
                 optim_gen.step()
                 score_r_avg = score_r.mean().item()
                 score_f_avg = score_f.mean().item()
+        if Distributed_Flag and local_rank >= 0:
+            torch.distributed.barrier()
+            # # 测试：每个GPU进程输出的模型第一层参数是相同的
+            # for param in gen.parameters():
+            #     print("    GPU{} Model param layer1=>".format(local_rank), param[0][0])
+            #     break
             
-        toc = time.time()    
+        toc = time.time()  
+        if Distributed_Flag==False or local_rank<=0:
+            if(epoch_i%20==0):
+                gan_weights = {'gen': gen.state_dict(), 'dis': dis.state_dict()}
+                torch.save(gan_weights, ckpt_path)
+                sample(gen, device=device)
+        print(f'epoch {epoch_i} score_r_avg {score_r_avg:.4e} score_f_avg {score_f_avg:.4e} g_loss: {g_loss.item():.4e} d_loss: {d_loss.item():.4e} time: {(toc - tic):.2f}s device: {device}')
+                
         
-        if(epoch_i%20==0):
-            gan_weights = {'gen': gen.state_dict(), 'dis': dis.state_dict()}
-            torch.save(gan_weights, ckpt_path)
-            sample(gen, device=device)
-            print(f'epoch {epoch_i} score_r_avg {score_r_avg:.4e} score_f_avg {score_f_avg:.4e} g_loss: {g_loss.item():.4e} d_loss: {d_loss.item():.4e} time: {(toc - tic):.2f}s')
-        
+    if Distributed_Flag:    
+        dist.destroy_process_group()       
 
 
 
@@ -102,8 +129,10 @@ def sample(gen:Generator, device='cuda'):
     gen = gen.to(device)
     gen = gen.eval()
     with torch.no_grad():
-        z = torch.randn(i_n * i_n, gen.nz, 1, 1, device=device)   # gen用的噪声向量
-        x_new = gen(z)
+        z = torch.randn(i_n * i_n, 
+                        gen.module.nz if Distributed_Flag else gen.nz,
+                        1, 1, device=device)   # gen用的噪声向量
+        x_new = gen.module(z) if Distributed_Flag else gen(z)         # 第一个epoch卡住的原因在这，我感觉是因为梯度被关闭了再gen，dpp就不会跑了
 
         x_new = einops.rearrange(x_new, '(n1 n2) c h w -> (n2 h) (n1 w) c', n1 = i_n)
         x_new = (x_new.clip(-1, 1) + 1) / 2 * 255
@@ -116,10 +145,37 @@ def sample(gen:Generator, device='cuda'):
 
 save_dir = './data/wgan_faces64'
 
+
 if __name__ == '__main__':
 
-    ckpt_path = os.path.join(save_dir,'model_vae.pth') 
-    device = 'cuda'
+    if Distributed_Flag:
+        # setup
+        local_rank = int(os.environ["LOCAL_RANK"]) ## DDP   
+        init_process_group(backend="nccl")
+        torch.cuda.set_device(local_rank)
+
+        # 
+        local_rank = dist.get_rank()
+        total_rank = dist.get_world_size()
+        device = torch.device("cuda", local_rank)
+    else:
+        local_rank = 0
+        device = 'cuda'
+    # #
+    # cv2.setNumThreads(0)
+    # cv2.ocl.setUseOpenCL(False)
+    
+    # # random reset
+    # seed = 1234
+    # torch.manual_seed(seed)
+    # torch.cuda.manual_seed(seed)
+    # torch.cuda.manual_seed_all(seed)
+    # random.seed(seed)
+    # np.random.seed(seed)
+
+
+    ckpt_path = os.path.join(save_dir,'model_wgan.pth') 
+    
     image_shape = get_img_shape()
     # nz = 100
     # ngf = 64
@@ -136,7 +192,7 @@ if __name__ == '__main__':
     # gen.load_state_dict(gan_weights['gen'])
     # dis.load_state_dict(gan_weights['dis'])
 
-    train(gen, dis, ckpt_path, device=device)
+    train( gen, dis, ckpt_path, local_rank, device=device)
 
     gan_weights = torch.load(ckpt_path)
     gen.load_state_dict(gan_weights['gen'])
