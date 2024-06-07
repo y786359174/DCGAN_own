@@ -6,13 +6,13 @@ from dataset import get_dataloader, get_img_shape
 from network import Generator,  Discriminator , wgan_flag, weights_init_normal
 
 import torch.distributed as dist ## DDP
-from torch.utils.data.distributed import DistributedSampler ## DDP
+# from torch.utils.data.distributed import DistributedSampler ## DDP
 from torch.nn.parallel import DistributedDataParallel as DDP ## DDP
-from torch.distributed import init_process_group, destroy_process_group ## DDP
 
 import cv2
 import einops
 import numpy as np
+import random
 # import tqdm as tqdm
 Distributed_Flag = True # torchrun -m --nnodes=1 --nproc_per_node=2 mainmp
 
@@ -151,7 +151,7 @@ if __name__ == '__main__':
     if Distributed_Flag:
         # setup
         local_rank = int(os.environ["LOCAL_RANK"]) ## DDP   
-        init_process_group(backend="nccl")
+        dist.init_process_group(backend="nccl")
         torch.cuda.set_device(local_rank)
 
         # 
@@ -166,12 +166,12 @@ if __name__ == '__main__':
     # cv2.ocl.setUseOpenCL(False)
     
     # # random reset
-    # seed = 1234
-    # torch.manual_seed(seed)
-    # torch.cuda.manual_seed(seed)
-    # torch.cuda.manual_seed_all(seed)
-    # random.seed(seed)
-    # np.random.seed(seed)
+    seed = 1234
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    random.seed(seed)
+    np.random.seed(seed)
 
 
     ckpt_path = os.path.join(save_dir,'model_wgan.pth') 
