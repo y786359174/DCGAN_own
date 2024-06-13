@@ -14,10 +14,10 @@ import einops
 import numpy as np
 import random
 # import tqdm as tqdm
-Distributed_Flag = True # torchrun -m --nnodes=1 --nproc_per_node=2 mainmp
+Distributed_Flag = True # torchrun -m --nnodes=1 --nproc_per_node=2 --master_port 29500 mainmp
 
 def train(gen:Generator, dis:Discriminator, ckpt_path, local_rank = 0, device = 'cuda'):
-    
+    print("using: ", device)    #你问我为什么写在这？因为main里总是有各种各样的地方会改device
     n_epochs = 10000
     batch_size = 256
     lr = 1e-5
@@ -29,13 +29,12 @@ def train(gen:Generator, dis:Discriminator, ckpt_path, local_rank = 0, device = 
                                                 # 这东西也能放在cuda中啊
     data_dir = '../faces'
     if Distributed_Flag:
-        dataloader = get_dataloader(batch_size, data_dir, num_workers=4, distributed=True)
         gen = torch.nn.SyncBatchNorm.convert_sync_batchnorm(gen).to(device)
         gen = DDP(gen, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
         dis = torch.nn.SyncBatchNorm.convert_sync_batchnorm(dis).to(device)
         dis = DDP(dis, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
-    else:
-        dataloader = get_dataloader(batch_size, data_dir, num_workers=4)
+    
+    dataloader = get_dataloader(batch_size, data_dir, num_workers=4, distributed=True)
 
     
     
@@ -63,8 +62,6 @@ def train(gen:Generator, dis:Discriminator, ckpt_path, local_rank = 0, device = 
         if(epoch_i%100==0 and k < k_max):          # 让k缓慢的增大到k_max
             k+=1
         for x,_ in dataloader:
-            if(x.shape[0]!=batch_size):
-                continue
             img_real = x.to(device)
 
             # 训练Dis
@@ -109,7 +106,7 @@ def train(gen:Generator, dis:Discriminator, ckpt_path, local_rank = 0, device = 
         toc = time.time()  
         if Distributed_Flag==False or local_rank<=0:
             if(epoch_i%20==0):
-                gan_weights = {'gen': gen.state_dict(), 'dis': dis.state_dict()}
+                gan_weights = {'gen': gen.module.state_dict(), 'dis': dis.module.state_dict()}
                 torch.save(gan_weights, ckpt_path)
                 sample(gen, device=device)
         print(f'epoch {epoch_i} score_r_avg {score_r_avg:.4e} score_f_avg {score_f_avg:.4e} g_loss: {g_loss.item():.4e} d_loss: {d_loss.item():.4e} time: {(toc - tic):.2f}s device: {device}')
@@ -165,7 +162,7 @@ if __name__ == '__main__':
     # cv2.setNumThreads(0)
     # cv2.ocl.setUseOpenCL(False)
     
-    # # random reset
+    # random reset
     seed = 1234
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -194,7 +191,7 @@ if __name__ == '__main__':
 
     train( gen, dis, ckpt_path, local_rank, device=device)
 
-    gan_weights = torch.load(ckpt_path)
-    gen.load_state_dict(gan_weights['gen'])
-    dis.load_state_dict(gan_weights['dis'])
-    sample(gen, device=device)
+    # gan_weights = torch.load(ckpt_path)
+    # gen.load_state_dict(gan_weights['gen'])
+    # dis.load_state_dict(gan_weights['dis'])
+    # sample(gen, device=device)
